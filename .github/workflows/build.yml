@@ -1,0 +1,82 @@
+name: Build OpenWrt 19.07 (Xiaomi Mi Router 4)
+
+on:
+  workflow_dispatch:          # 手动点 Run workflow 触发
+  # push:                     # 想改文件就自动编译的话，取消注释
+  #   paths: [config.seed, diy-part2.sh, files/**]
+
+env:
+  REPO_URL: https://github.com/openwrt/openwrt
+  REPO_BRANCH: openwrt-19.07
+  CONFIG_FILE: config.seed
+  DIY_SH: diy-part2.sh
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential ccache ecj fastjar file g++ gawk gettext git \
+            libelf-dev libncurses5-dev libncursesw5-dev libssl-dev python3 python-is-python3 \
+            python3-distutils python3-setuptools rsync subversion swig unzip wget xsltproc zlib1g-dev \
+            java-propose-classpath
+
+      - name: Clone source
+        run: git clone --depth 1 -b "$REPO_BRANCH" "$REPO_URL" openwrt
+
+      - name: Update & install feeds
+        working-directory: openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Add Mi Router 4 support
+        working-directory: openwrt
+        run: bash "$GITHUB_WORKSPACE/$DIY_SH"
+
+      - name: Load config
+        working-directory: openwrt
+        run: |
+          cp "$GITHUB_WORKSPACE/$CONFIG_FILE" .config
+          make defconfig
+          grep -q '^CONFIG_TARGET_ramips_mt7621_DEVICE_mir4=y' .config \
+            || { echo "::error::mir4 没被选中，补丁没生效"; exit 1; }
+          echo "--- zram/zstd/tproxy 相关项 ---"
+          grep -E 'zram|zstd|tproxy' .config | grep '=y' || true
+
+      - name: Download sources
+        working-directory: openwrt
+        run: |
+          make download -j8
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: Compile
+        working-directory: openwrt
+        run: |
+          make -j$(nproc) || make -j1 V=s
+
+      - name: Collect firmware
+        run: |
+          mkdir -p firmware
+          cp openwrt/bin/targets/ramips/mt7621/*mir4* firmware/ || true
+          cp openwrt/.config firmware/build.config
+          ls -lh firmware
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-19.07-mir4
+          path: firmware/*
