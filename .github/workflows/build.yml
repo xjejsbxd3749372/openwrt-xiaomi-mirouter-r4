@@ -1,9 +1,8 @@
 name: Build OpenWrt 19.07 (Xiaomi Mi Router 4)
 
 on:
-  workflow_dispatch:          # 手动点 Run workflow 触发
-  # push:                     # 想改文件就自动编译的话，取消注释
-  #   paths: [config.seed, diy-part2.sh, files/**]
+  repository_dispatch:
+  workflow_dispatch:
 
 env:
   REPO_URL: https://github.com/openwrt/openwrt
@@ -18,15 +17,15 @@ jobs:
     timeout-minutes: 300
 
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Free disk space
+      - name: Free Disk Space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
-      - name: Install dependencies
+      - name: Install Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential ccache ecj fastjar file g++ gawk gettext git \
@@ -34,49 +33,51 @@ jobs:
             python3-distutils python3-setuptools rsync subversion swig unzip wget xsltproc zlib1g-dev \
             java-propose-classpath
 
-      - name: Clone source
+      - name: Clone Source Code
         run: git clone --depth 1 -b "$REPO_BRANCH" "$REPO_URL" openwrt
 
-      - name: Update & install feeds
+      - name: Load Custom Feeds & Add PassWall
         working-directory: openwrt
         run: |
+          # 写入真实的、兼容旧版 OpenWrt 环境的 PassWall 及其附属依赖库网址
+          echo "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main" >> feeds.conf.default
+          echo "src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main" >> feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Add Mi Router 4 support
+      - name: Execute Custom Patch (diy-part2.sh)
         working-directory: openwrt
         run: bash "$GITHUB_WORKSPACE/$DIY_SH"
 
-      - name: Load config
+      - name: Load Config Seed
         working-directory: openwrt
         run: |
           cp "$GITHUB_WORKSPACE/$CONFIG_FILE" .config
           make defconfig
+          # 严格验证您的 config.seed 目标设备 mir4 是否完美生效
           grep -q '^CONFIG_TARGET_ramips_mt7621_DEVICE_mir4=y' .config \
-            || { echo "::error::mir4 没被选中，补丁没生效"; exit 1; }
-          echo "--- zram/zstd/tproxy 相关项 ---"
-          grep -E 'zram|zstd|tproxy' .config | grep '=y' || true
+            || { echo "::error::mir4 机型未被选中，请检查补丁脚本！"; exit 1; }
 
-      - name: Download sources
+      - name: Download Packages
         working-directory: openwrt
         run: |
           make download -j8
           find dl -size -1024c -exec rm -f {} \;
 
-      - name: Compile
+      - name: Compile the Firmware
         working-directory: openwrt
         run: |
           make -j$(nproc) || make -j1 V=s
 
-      - name: Collect firmware
+      - name: Organize & Collect Firmware
         run: |
           mkdir -p firmware
           cp openwrt/bin/targets/ramips/mt7621/*mir4* firmware/ || true
           cp openwrt/.config firmware/build.config
           ls -lh firmware
 
-      - name: Upload firmware
+      - name: Upload Firmware Directory
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-19.07-mir4
+          name: openwrt-19.07-mir4-firmware
           path: firmware/*
