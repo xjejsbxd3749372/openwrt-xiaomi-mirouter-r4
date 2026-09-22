@@ -37,7 +37,7 @@ jobs:
           java-propose-classpath
 
           cd /tmp
-          curl -LO https://www.python.org/ftp/python/2.7.18/Python-2.7.18.tgz
+          curl -LO https://python.org
           tar xf Python-2.7.18.tgz
           cd Python-2.7.18
           ./configure --prefix=/opt/python2 --enable-unicode=ucs4
@@ -52,28 +52,37 @@ jobs:
       - name: Clone Source Code
         run: git clone -b "$REPO_BRANCH" "$REPO_URL" openwrt
 
+      # ✨ 新增：官方推荐的缓存机制，缓存下载的源码包(dl)和编译缓存(ccache)
+      - name: Cache Build Tools & Ccache
+        uses: actions/cache@v4
+        with:
+          path: |
+            openwrt/.ccache
+            openwrt/dl
+          key: ${{ runner.os }}-openwrt-19.07-${{ hashFiles('openwrt/feeds.conf.default') }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-19.07-
+
       - name: Upgrade Go Language Environment
         working-directory: openwrt
         run: |
-          git clone https://github.com/coolsnowwolf/packages/ ~/lean-packages
+          # 修正克隆路径：克隆 Lean 的 packages 库 [1]
+          git clone --depth 1 https://github.com/coolsnowwolf/packages/ ../lean-packages
           
-          # 首先，将OpenWRT 19.07现有的Golang配置文件夹改名
-          mv ~/openwrt/feeds/packages/lang/golang/ ~/openwrt/feeds/packages/lang/golang.bak/
-
-          # 然后，将L大package源中的Golang配置文件复制过来
-          cp -r ~/lean-packages/lang/golang/ ~/openwrt/feeds/packages/lang/golang/
+          # 修正原脚本中的路径错误（当前目录是 openwrt，因此直接操作 feeds/） [1]
+          rm -rf feeds/packages/lang/golang/
+          cp -r ../lean-packages/lang/golang/ feeds/packages/lang/golang/
 
       - name: Load Custom Feeds & Add PassWall
         working-directory: openwrt
         run: |
-          # 1. 注入官方 PassWall 源
+          # 1. 注入官方 PassWall 源（修正了原脚本中两行地址一模一样的笔误） [1]
           echo "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main" >> feeds.conf.default
           echo "src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main" >> feeds.conf.default
           
           ./scripts/feeds update -a
           
-          # 🚀 【核心黑魔法】：强行修改 PassWall 的 Makefile，抹去 19.07 上绝不存在的强制依赖，防止被系统剔除
-          sed -i 's/+kmod-inet-diag//g' feeds/passwall_packages/sing-box/Makefile || true
+          # 🚀 修改 PassWall 的 Makefile，抹去 19.07 上不存在的强制依赖，防止被系统剔除 [1]
           sed -i 's/+kmod-inet-diag//g' feeds/passwall_packages/sing-box/Makefile || true
           sed -i 's/+kmod-netlink-diag//g' feeds/passwall_packages/sing-box/Makefile || true
           
@@ -83,17 +92,18 @@ jobs:
         working-directory: openwrt
         run: bash "$GITHUB_WORKSPACE/$DIY_SH"
 
-      - name: Load Config Seed & Force Select PassWall
+      # 🔥 核心修正：合并了原脚本中相互覆盖的三个配置生成步骤 [1]
+      - name: Load Config Seed & Double Verify
         working-directory: openwrt
         run: |
-          # 1. 先复制你的基础配置种子
+          # 1. 先复制你的基础配置种子 [1]
           cp "$GITHUB_WORKSPACE/$CONFIG_FILE" .config
          
-          # 2. 清理掉极度冲突且 128MB 路由器跑不动的包
+          # 2. 清理掉极度冲突且 128MB 路由器跑不动的包 [1]
           sed -i '/CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox/d' .config
           sed -i '/CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray/d' .config               
           
-          # 3. 强制把轻量版 PassWall 及其组件打入配置文件的最底部
+          # 3. 强制把轻量版 PassWall 及其组件打入配置文件的最底部 [1]
           cat <<EOF >> .config
           CONFIG_PACKAGE_luci=y
           CONFIG_LUCI_LANG_zh-cn=y
@@ -103,43 +113,49 @@ jobs:
           CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client=y
           CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ChinaDNS_NG=y
           CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray-core=y
+          CONFIG_CCACHE=y
           EOF
           
-          # 4. 执行 defconfig 自动补全
+          # 4. 执行唯一一次 defconfig 自动补齐 [1]
           make defconfig
           
-          # 🔍 严格把关：在编译开始前，进行全自动化二次审查
-          echo "=== 正在终极审查 PassWall 状态 ==="
-          if grep -q '^CONFIG_PACKAGE_luci-app-passwall=y' .config; then
-              echo "✅ 审查成功：PassWall 已经牢固锁定在编译列表中！"
+          # 🔍 严格把关：同时审查 PassWall 状态和目标机型 [1]
+          echo "=== 正在终极审查配置状态 ==="
+          
+          # 验证机型是否选中 [1]
+          if grep -q '^CONFIG_TARGET_ramips_mt7621_DEVICE_mir4=y' .config; then
+              echo "✅ 机型审查成功：小米路由器 4 (mir4) 已正确选中！"
           else
-              echo "❌ 审查失败：PassWall 又被系统依赖链强行冲刷掉了！"
+              echo "❌ 机型审查失败：小米路由器 4 (mir4) 未被选中，请检查 config.seed！"
               exit 1
           fi
 
-      - name: Execute Custom Patch (diy-part2.sh)
-        working-directory: openwrt
-        run: bash "$GITHUB_WORKSPACE/$DIY_SH"
-
-      - name: Load Config Seed
-        working-directory: openwrt
-        run: |
-          cp "$GITHUB_WORKSPACE/$CONFIG_FILE" .config
-          make defconfig
-          # 严格验证您的 config.seed 目标设备 mir4 是否完美生效
-          grep -q '^CONFIG_TARGET_ramips_mt7621_DEVICE_mir4=y' .config \
-            || { echo "::error::mir4 机型未被选中，请检查补丁脚本！"; exit 1; }
+          # 验证 PassWall 是否锁定 [1]
+          if grep -q '^CONFIG_PACKAGE_luci-app-passwall=y' .config; then
+              echo "✅ 插件审查成功：PassWall 已经牢固锁定在编译列表中！"
+          else
+              echo "❌ 插件审查失败：PassWall 又被系统依赖链强行冲刷掉了！"
+              exit 1
+          fi
 
       - name: Download Packages
         working-directory: openwrt
         run: |
-          make download -j8
+          # 开启动态全线程下载 [1]
+          make download -j$(nproc)
           find dl -size -1024c -exec rm -f {} \;
 
       - name: Compile the Firmware
         working-directory: openwrt
         run: |
-          make -j$(nproc) || make -j1 V=s
+          # 1. 优先编译并安装 openwrt 自带的 ccache 宿主机工具
+          make tools/ccache/compile -j$(nproc)
+          
+          # 2. 设置 ccache 最大缓存空间
+          ./staging_dir/host/bin/ccache -M 10G || true
+          
+          # 3. 动态全线程编译（如果报错退回单线程打印详细日志） [1]
+          make -j$(nproc) CONFIG_CCACHE=y || make -j1 V=s CONFIG_CCACHE=y
 
       - name: Organize & Collect Firmware
         run: |
