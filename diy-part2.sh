@@ -12,25 +12,31 @@ MK=target/linux/ramips/image/mt7621.mk
 # 1) DTS
 cp "$WS/files/MIR4.dts" "$DTS_DIR/MIR4.dts"
 
-# 2) image/mt7621.mk：复制 Device/mir3g 整块，改名为 mir4
+# 2) image/mt7621.mk：复制 Device/xiaomi_mi-router-3g 整块，改名为 mir4
 python3 - "$MK" <<'PY'
 import re, sys
 p = sys.argv[1]
 s = open(p).read()
-if re.search(r'^define Device/mir4$', s, re.M):
+if re.search(r'^define Device/xiaomi_mir4$', s, re.M):
     print("mir4 已存在，跳过"); sys.exit(0)
-m = re.search(r'^define Device/mir3g\n.*?^TARGET_DEVICES \+= mir3g\n', s, re.S | re.M)
+
+# 正确匹配 OpenWrt 19.07 中的 xiaomi_mi-router-3g 块
+m = re.search(r'^define Device/xiaomi_mi-router-3g\n.*?^TARGET_DEVICES \+= xiaomi_mi-router-3g\n', s, re.S | re.M)
 if not m:
-    sys.exit("::error::在 %s 里没找到 Device/mir3g 块" % p)
+    sys.exit("::error::在 %s 里没找到 Device/xiaomi_mi-router-3g 块" % p)
+
 blk = m.group(0)
-new = (blk.replace('mir3g', 'mir4')
+# 进行针对 Xiaomi Mi Router 4 的替换
+new = (blk.replace('xiaomi_mi-router-3g', 'xiaomi_mir4')
           .replace('MIR3G', 'MIR4')
           .replace('Mi Router 3G', 'Mi Router 4'))
-# R4 没有 USB
+
+# R4 没有 USB，移除相关软件包定义
 new = re.sub(r'[ \t]*kmod-usb3|[ \t]*kmod-usb-ledtrig-usbport', '', new)
+
 s = s.replace(blk, blk + '\n' + new)
 open(p, 'w').write(s)
-print("已生成 Device/mir4：\n" + new)
+print("已成功生成 Device/xiaomi_mir4：\n" + new)
 PY
 
 # 3) 板级 case 分支：凡是 xiaomi,mir3g 的地方都加上 xiaomi,mir4
