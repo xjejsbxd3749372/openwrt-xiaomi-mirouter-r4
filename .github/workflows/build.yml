@@ -50,16 +50,72 @@ jobs:
           python --version
 
       - name: Clone Source Code
-        run: git clone --depth 1 -b "$REPO_BRANCH" "$REPO_URL" openwrt
+        run: git clone -b "$REPO_BRANCH" "$REPO_URL" openwrt
+
+      - name: Upgrade Go Language Environment
+        working-directory: openwrt
+        run: |
+          git clone https://github.com/coolsnowwolf/packages/ ~/lean-packages
+          
+          # 首先，将OpenWRT 19.07现有的Golang配置文件夹改名
+          mv ~/openwrt/feeds/packages/lang/golang/ ~/openwrt/feeds/packages/lang/golang.bak/
+
+          # 然后，将L大package源中的Golang配置文件复制过来
+          cp -r ~/lean-packages/lang/golang/ ~/openwrt/feeds/packages/lang/golang/
 
       - name: Load Custom Feeds & Add PassWall
         working-directory: openwrt
         run: |
-          # 写入真实的、兼容旧版 OpenWrt 环境的 PassWall 及其附属依赖库网址
+          # 1. 注入官方 PassWall 源
           echo "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main" >> feeds.conf.default
-          echo "src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main" >> feeds.conf.default
+          echo "src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main" >> feeds.conf.default
+          
           ./scripts/feeds update -a
+          
+          # 🚀 【核心黑魔法】：强行修改 PassWall 的 Makefile，抹去 19.07 上绝不存在的强制依赖，防止被系统剔除
+          sed -i 's/+kmod-inet-diag//g' feeds/passwall_packages/sing-box/Makefile || true
+          sed -i 's/+kmod-inet-diag//g' feeds/passwall_packages/sing-box/Makefile || true
+          sed -i 's/+kmod-netlink-diag//g' feeds/passwall_packages/sing-box/Makefile || true
+          
           ./scripts/feeds install -a
+
+      - name: Execute Custom Patch (diy-part2.sh)
+        working-directory: openwrt
+        run: bash "$GITHUB_WORKSPACE/$DIY_SH"
+
+      - name: Load Config Seed & Force Select PassWall
+        working-directory: openwrt
+        run: |
+          # 1. 先复制你的基础配置种子
+          cp "$GITHUB_WORKSPACE/$CONFIG_FILE" .config
+         
+          # 2. 清理掉极度冲突且 128MB 路由器跑不动的包
+          sed -i '/CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox/d' .config
+          sed -i '/CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray/d' .config               
+          
+          # 3. 强制把轻量版 PassWall 及其组件打入配置文件的最底部
+          cat <<EOF >> .config
+          CONFIG_PACKAGE_luci=y
+          CONFIG_LUCI_LANG_zh-cn=y
+          CONFIG_PACKAGE_luci-app-passwall=y
+          CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Libev_Client=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ChinaDNS_NG=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray-core=y
+          EOF
+          
+          # 4. 执行 defconfig 自动补全
+          make defconfig
+          
+          # 🔍 严格把关：在编译开始前，进行全自动化二次审查
+          echo "=== 正在终极审查 PassWall 状态 ==="
+          if grep -q '^CONFIG_PACKAGE_luci-app-passwall=y' .config; then
+              echo "✅ 审查成功：PassWall 已经牢固锁定在编译列表中！"
+          else
+              echo "❌ 审查失败：PassWall 又被系统依赖链强行冲刷掉了！"
+              exit 1
+          fi
 
       - name: Execute Custom Patch (diy-part2.sh)
         working-directory: openwrt
