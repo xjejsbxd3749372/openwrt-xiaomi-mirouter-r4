@@ -43,16 +43,28 @@ open(p, 'w').write(s)
 print("已成功修正并生成 Device/mir4：\n" + new)
 PY
 
-# 3) 板级 case 分支：凡是 xiaomi,mir3g 的地方都加上 xiaomi,mir4
+# 3) 板级 case 分支：自动检测并为 19.07 分支中的网络/升级脚本追加 xiaomi,mir4 支持
+echo "正在注入板级配置与网络分支..."
+
+# 19.07 的网络配置文件实际上在 target/linux/ramips/base-files/etc/board.d/01_network (而非 mt7621 子目录)
 for f in \
-  target/linux/ramips/mt7621/base-files/etc/board.d/02_network \
+  target/linux/ramips/base-files/etc/board.d/01_network \
   target/linux/ramips/mt7621/base-files/lib/upgrade/platform.sh \
   package/boot/uboot-envtools/files/ramips
 do
-  [ -f "$f" ] || { echo "::error::缺少文件 $f"; exit 1; }
-  sed -i -E 's/^([[:space:]]*)(xiaomi,)?mir3g(\||\))/\1\2mir3g|\2mir4\3/' "$f"
-  grep -q 'mir4' "$f" || { echo "::error::$f 里没有匹配到 mir3g 分支，需要手动检查"; exit 1; }
-  echo "== $f"; grep -n 'mir4' "$f"
+  # 如果 01_network 找不到，则尝试匹配 02_network（确保双向兼容）
+  if [ "$f" = "target/linux/ramips/base-files/etc/board.d/01_network" ] && [ ! -f "$f" ]; then
+    f="target/linux/ramips/mt7621/base-files/etc/board.d/02_network"
+  fi
+
+  if [ -f "$f" ]; then
+    echo "== 正在处理文件: $f"
+    sed -i -E 's/^([[:space:]]*)(xiaomi,)?mir3g(\||\))/\1\2mir3g|\2mir4\3/' "$f"
+    grep -q 'mir4' "$f" || { echo "::error::$f 里没有匹配到 mir3g 分支，注入失败！"; exit 1; }
+    grep -n 'mir4' "$f"
+  else
+    echo "::warning:: 忽略未找到的历史分支路径: $f"
+  fi
 done
 
 # 4) （可选）zram 用 zstd：给内核加 zstd 支持
