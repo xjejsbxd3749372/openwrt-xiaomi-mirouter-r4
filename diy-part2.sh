@@ -41,30 +41,116 @@ open(p, 'w').write(s)
 print("已成功修正并注入 Device/mir4 编译块")
 PY
 
-# 3) 19.07 板级网络与升级配置注入 (兼容性高防错处理)
-echo "==> 正在配置 19.07 分支下的网络与固件升级兼容性..."
+# 3) 19.07 板级网络与升级配置注入
+echo "==> 正在配置 19.07 分支下 MIR4 网络与升级兼容..."
 
-# 19.07 的网口定义文件在 ramips 根目录下的 01_network 中，而不是 mt7621 子目录下
-FILES_TO_PATCH=(
-  "target/linux/ramips/base-files/etc/board.d/01_network"
-  "target/linux/ramips/mt7621/base-files/lib/upgrade/platform.sh"
-  "package/boot/uboot-envtools/files/ramips"
+# -------------------------------------------------
+# 1. 网络配置：单独添加 MIR4
+# -------------------------------------------------
+
+NETWORK_FILE="target/linux/ramips/base-files/etc/board.d/02_network"
+
+if [ -f "$NETWORK_FILE" ]; then
+
+    echo "==> 检查 $NETWORK_FILE"
+
+    if grep -q "xiaomi,mir4" "$NETWORK_FILE"; then
+        echo "MIR4 网络配置已经存在，跳过"
+    else
+
+        echo "==> 正在注入 MIR4 switch 配置"
+
+        python3 - "$NETWORK_FILE" <<'PY'
+import sys
+
+file = sys.argv[1]
+
+data = open(file).read()
+
+# 找到 xiaomi,mir3g case
+target = '''xiaomi,mir3g)'''
+
+if target not in data:
+    print("未找到 mir3g 网络配置，请检查文件结构")
+    sys.exit(0)
+
+
+insert = r'''
+xiaomi,mir4)
+	ucidef_add_switch "switch0" \
+		"1:lan:2" "2:lan:1" "4:wan" "6t@eth0"
+	;;
+
+'''
+
+data = data.replace(
+    target,
+    insert + target,
+    1
 )
 
-for f in "${FILES_TO_PATCH[@]}"; do
-  if [ -f "$f" ]; then
-    echo "正在处理文件: $f"
-    # 将包含 mir3g 的地方兼容扩展支持 mir4
-    sed -i -E 's/^([[:space:]]*)(xiaomi,)?mir3g(\||\))/\1\2mir3g|\2mir4\3/' "$f"
-    if grep -q 'mir4' "$f"; then
-      echo "成功在 $f 中为 mir4 注入兼容逻辑！"
-    else
-      echo "::warning:: 文件 $f 未能成功匹配注入，可能格式有变"
+open(file,"w").write(data)
+
+print("MIR4 网络 switch 配置注入完成")
+
+PY
+
     fi
-  else
-    echo "::warning:: 19.07 分支中未检测到文件 $f，已安全跳过此路径"
-  fi
-done
+
+else
+    echo "::warning:: 未找到 $NETWORK_FILE"
+fi
+
+
+
+# -------------------------------------------------
+# 2. 升级脚本 platform.sh 自动兼容 MIR4
+# -------------------------------------------------
+
+PLATFORM_FILE="target/linux/ramips/base-files/lib/upgrade/platform.sh"
+
+if [ -f "$PLATFORM_FILE" ]; then
+
+    echo "==> 处理 upgrade platform.sh"
+
+    sed -i -E \
+    's/(xiaomi,)?mir3g/\1mir3g|\1mir4/g' \
+    "$PLATFORM_FILE"
+
+    grep -q "mir4" "$PLATFORM_FILE" \
+        && echo "platform.sh MIR4 注入成功" \
+        || echo "::warning:: platform.sh 未发现 MIR4"
+
+else
+    echo "::warning:: 未找到 $PLATFORM_FILE"
+fi
+
+
+
+# -------------------------------------------------
+# 3. uboot-envtools 自动兼容
+# -------------------------------------------------
+
+UBOOT_FILE="package/boot/uboot-envtools/files/ramips"
+
+if [ -f "$UBOOT_FILE" ]; then
+
+    echo "==> 处理 uboot-envtools"
+
+    sed -i -E \
+    's/(xiaomi,)?mir3g/\1mir3g|\1mir4/g' \
+    "$UBOOT_FILE"
+
+    grep -q "mir4" "$UBOOT_FILE" \
+        && echo "uboot-envtools MIR4 注入成功" \
+        || echo "::warning:: uboot-envtools 未发现 MIR4"
+
+else
+    echo "::warning:: 未找到 $UBOOT_FILE"
+fi
+
+
+echo "==> MIR4 板级兼容配置完成"
 
 # 4) 给旧内核增加 zstd 支持
 CFG=target/linux/ramips/mt7621/config-4.14
