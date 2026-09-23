@@ -29,11 +29,21 @@ jobs:
 
       - name: Add swap (Go 编 xray 防 OOM)
         run: |
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
           free -h
+          swapon --show || true
+          SWAP=/mnt/openwrt-swap
+          sudo swapoff "$SWAP" 2>/dev/null || true
+          sudo rm -f "$SWAP"
+          if ! sudo fallocate -l 8G "$SWAP"; then
+            echo "fallocate 不可用，改用 dd"
+            sudo rm -f "$SWAP"
+            sudo dd if=/dev/zero of="$SWAP" bs=1M count=8192 status=progress
+          fi
+          sudo chmod 600 "$SWAP"
+          sudo mkswap "$SWAP"
+          sudo swapon "$SWAP"
+          free -h
+          swapon --show
 
       - name: Install Dependencies
         run: |
