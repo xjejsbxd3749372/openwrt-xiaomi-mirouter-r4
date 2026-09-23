@@ -10,11 +10,12 @@ env:
   CONFIG_FILE: config.seed
   DIY_SH: diy-part2.sh
   TZ: Asia/Shanghai
+  FORCE_UNSAFE_CONFIGURE: 1
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 300
+    timeout-minutes: 360
 
     steps:
       - name: Checkout Repository
@@ -23,154 +24,197 @@ jobs:
       - name: Free Disk Space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/share/swift /usr/local/share/powershell /usr/local/graalvm
           df -h /
+
+      - name: Add swap (Go 编 xray 防 OOM)
+        run: |
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
 
       - name: Install Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-          build-essential ccache ecj fastjar file g++ gawk gettext git \
-          libelf-dev libncurses5-dev libncursesw5-dev libssl-dev \
-          libbz2-dev libreadline-dev libsqlite3-dev libffi-dev \
-          rsync subversion swig unzip wget xsltproc zlib1g-dev \
-          curl ca-certificates tar make \
-          java-propose-classpath
+            build-essential ccache file g++ gawk gettext git \
+            libelf-dev libncurses5-dev libncursesw5-dev libssl-dev \
+            libbz2-dev libreadline-dev libsqlite3-dev libffi-dev \
+            rsync subversion swig unzip wget xsltproc zlib1g-dev \
+            curl ca-certificates tar make python3 python3-distutils \
+            gcc-10 g++-10 flex bison gperf libtool pkg-config \
+            libgmp-dev libmpc-dev libmpfr-dev unzip device-tree-compiler \
+            python3-setuptools python3-dev quilt help2man
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-10 100
+          gcc --version
 
-          cd /tmp
-          curl -LO https://python.org
-          tar xf Python-2.7.18.tgz
-          cd Python-2.7.18
-          ./configure --prefix=/opt/python2 --enable-unicode=ucs4
-          make -j"$(nproc)"
-          sudo make install
-
-          sudo ln -sf /opt/python2/bin/python2.7 /usr/local/bin/python
-          sudo ln -sf /opt/python2/bin/python2.7 /usr/local/bin/python2
-
-          python --version
+          if ! command -v python2 >/dev/null 2>&1; then
+            sudo apt-get install -y python2 python2-dev || true
+          fi
+          if ! command -v python2 >/dev/null 2>&1; then
+            cd /tmp
+            curl -fL -o Python-2.7.18.tgz https://www.python.org/ftp/python/2.7.18/Python-2.7.18.tgz
+            tar xf Python-2.7.18.tgz
+            cd Python-2.7.18
+            ./configure --prefix=/opt/python2 --enable-unicode=ucs4
+            make -j"$(nproc)"
+            sudo make install
+            sudo ln -sf /opt/python2/bin/python2.7 /usr/local/bin/python2
+          fi
+          sudo ln -sf "$(command -v python2 || echo /usr/bin/python2)" /usr/local/bin/python
+          python --version || python2 --version
 
       - name: Clone Source Code
-        run: git clone -b "$REPO_BRANCH" "$REPO_URL" openwrt
+        run: git clone --depth 1 -b "$REPO_BRANCH" "$REPO_URL" openwrt
 
-      # ✨ 新增：官方推荐的缓存机制，缓存下载的源码包(dl)和编译缓存(ccache)
-      - name: Cache Build Tools & Ccache
+      - name: Cache dl & ccache
         uses: actions/cache@v4
         with:
           path: |
             openwrt/.ccache
             openwrt/dl
-          key: ${{ runner.os }}-openwrt-19.07-${{ hashFiles('openwrt/feeds.conf.default') }}
+          key: ${{ runner.os }}-openwrt-19.07-pw-${{ hashFiles('config.seed', 'diy-part2.sh') }}
           restore-keys: |
+            ${{ runner.os }}-openwrt-19.07-pw-
             ${{ runner.os }}-openwrt-19.07-
 
-      - name: Upgrade Go Language Environment
+      - name: Add PassWall feeds (不要 kenzo/small，会和官方 Passwall 撞包)
         working-directory: openwrt
         run: |
-          # 修正克隆路径：克隆 Lean 的 packages 库 [1]
-          git clone --depth 1 https://github.com/coolsnowwolf/packages/ ../lean-packages
-          
-          # 修正原脚本中的路径错误（当前目录是 openwrt，因此直接操作 feeds/） [1]
-          rm -rf feeds/packages/lang/golang/
-          cp -r ../lean-packages/lang/golang/ feeds/packages/lang/golang/
+          # 必须插在最上面，且 luci 仓库不能写成 packages
+          sed -i '1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' feeds.conf.default
+          sed -i '2i src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
+          cat feeds.conf.default
 
-      - name: Load Custom Feeds & Add PassWall
+      - name: Update feeds, replace golang, drop stale packages
         working-directory: openwrt
         run: |
-
-          sed -i '1i src-git kenzo https://github.com/kenzok8/openwrt-packages' feeds.conf.default
-          sed -i '2i src-git small https://github.com/kenzok8/small' feeds.conf.default
-          
-          # 1. 注入官方 PassWall 源（修正了原脚本中两行地址一模一样的笔误） [1]
-          echo "src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main" >> feeds.conf.default
-          echo "src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main" >> feeds.conf.default
-
-          git pull
           ./scripts/feeds update -a
-          
-          # 🚀 修改 PassWall 的 Makefile，抹去 19.07 上不存在的强制依赖，防止被系统剔除 [1]
-          sed -i 's/+kmod-inet-diag//g' feeds/passwall_packages/sing-box/Makefile || true
-          sed -i 's/+kmod-netlink-diag//g' feeds/passwall_packages/sing-box/Makefile || true
-          
+
+          # 必须在 feeds update 之后换 Go，否则会被 19.07 自带的 1.13 覆盖
+          rm -rf feeds/packages/lang/golang
+          git clone --depth 1 -b 24.x https://github.com/sbwml/packages_lang_golang feeds/packages/lang/golang
+
+          # 清掉官方 feeds 里过期/撞名的核心，用 passwall_packages
+          rm -rf feeds/packages/net/xray-core \
+                 feeds/packages/net/v2ray-core \
+                 feeds/packages/net/v2ray-geodata \
+                 feeds/packages/net/sing-box \
+                 feeds/packages/net/chinadns-ng \
+                 feeds/packages/net/dns2socks \
+                 feeds/packages/net/hysteria \
+                 feeds/packages/net/ipt2socks \
+                 feeds/packages/net/microsocks \
+                 feeds/packages/net/naiveproxy \
+                 feeds/packages/net/shadowsocks-rust \
+                 feeds/packages/net/shadowsocksr-libev \
+                 feeds/packages/net/simple-obfs \
+                 feeds/packages/net/tcping \
+                 feeds/packages/net/v2ray-plugin \
+                 feeds/packages/net/xray-plugin \
+                 feeds/packages/net/geoview \
+                 feeds/packages/net/shadow-tls \
+                 feeds/luci/applications/luci-app-passwall || true
+
           ./scripts/feeds install -a
 
       - name: Execute Custom Patch (diy-part2.sh)
         working-directory: openwrt
         run: bash "$GITHUB_WORKSPACE/$DIY_SH"
 
-      # 🔥 核心修正：合并了原脚本中相互覆盖的三个配置生成步骤 [1]
-      - name: Load Config Seed & Double Verify
+      - name: Load Config Seed & lock PassWall
         working-directory: openwrt
         run: |
-          # 1. 先复制你的基础配置种子 [1]
           cp "$GITHUB_WORKSPACE/$CONFIG_FILE" .config
-         
-          # 2. 清理掉极度冲突且 128MB 路由器跑不动的包 [1]
-          sed -i '/CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox/d' .config
-          sed -i '/CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray/d' .config               
-          
-          # 3. 强制把轻量版 PassWall 及其组件打入配置文件的最底部 [1]
-          cat <<EOF >> .config
-          CONFIG_PACKAGE_luci=y
-          CONFIG_LUCI_LANG_zh-cn=y
-          CONFIG_PACKAGE_luci-app-passwall=y
-          CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=y
-          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Libev_Client=y
-          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client=y
-          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ChinaDNS_NG=y
-          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray-core=y
-          CONFIG_CCACHE=y
-          EOF
-          
-          # 4. 执行唯一一次 defconfig 自动补齐 [1]
+
+          # 清掉可能残留的错误 INCLUDE 名，再强制写入 19.07 能编过的选项
+          sed -i '/CONFIG_PACKAGE_luci-app-passwall/d' .config
+
+          cat >> .config <<'EOF'
+CONFIG_CCACHE=y
+CONFIG_PACKAGE_luci=y
+CONFIG_LUCI_LANG_zh-cn=y
+CONFIG_PACKAGE_luci-compat=y
+CONFIG_PACKAGE_luci-lib-jsonc=y
+CONFIG_PACKAGE_luci-app-passwall=y
+CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y
+CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=y
+# CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy is not set
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client=y
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Simple_Obfs=y
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Hysteria is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_NaiveProxy is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray_Plugin is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Geodata is not set
+CONFIG_PACKAGE_xray-core=y
+CONFIG_PACKAGE_unzip=y
+CONFIG_PACKAGE_chinadns-ng=y
+CONFIG_PACKAGE_ipt2socks=y
+CONFIG_PACKAGE_kmod-ipt-offload=y
+EOF
+
           make defconfig
-          
-          # 🔍 严格把关：同时审查 PassWall 状态和目标机型 [1]
-          echo "=== 正在终极审查配置状态 ==="
-          
-          # 验证机型是否选中 [1]
+
+          echo "=== 审查配置 ==="
+          grep -E 'CONFIG_TARGET_ramips_mt7621_DEVICE_mir4|CONFIG_PACKAGE_luci-app-passwall[=_]|CONFIG_PACKAGE_xray-core' .config | grep -v '^#' || true
+
           if grep -q '^CONFIG_TARGET_ramips_mt7621_DEVICE_mir4=y' .config; then
-              echo "✅ 机型审查成功：小米路由器 4 (mir4) 已正确选中！"
+            echo "✅ 机型：小米路由器 4 (mir4)"
           else
-              echo "❌ 机型审查失败：小米路由器 4 (mir4) 未被选中，请检查 config.seed！"
-              exit 1
+            echo "❌ 机型未选中"
+            exit 1
           fi
 
-          # 验证 PassWall 是否锁定 [1]
           if grep -q '^CONFIG_PACKAGE_luci-app-passwall=y' .config; then
-              echo "✅ 插件审查成功：PassWall 已经牢固锁定在编译列表中！"
+            echo "✅ PassWall 已锁定"
           else
-              echo "❌ 插件审查失败：PassWall 又被系统依赖链强行冲刷掉了！"
-              exit 1
+            echo "❌ PassWall 仍被依赖链冲掉，dump 相关行："
+            grep -n 'passwall\|lyaml\|iptables-zz\|iptables-mod-socket\|luci-compat' .config || true
+            exit 1
+          fi
+
+          if grep -q '^CONFIG_PACKAGE_xray-core=y' .config; then
+            echo "✅ xray-core 已锁定"
+          else
+            echo "❌ xray-core 未选中"
+            exit 1
           fi
 
       - name: Download Packages
         working-directory: openwrt
         run: |
-          # 开启动态全线程下载 [1]
-          make download -j$(nproc)
+          make download -j"$(nproc)"
           find dl -size -1024c -exec rm -f {} \;
 
       - name: Compile the Firmware
         working-directory: openwrt
+        env:
+          GOPROXY: https://proxy.golang.org,direct
         run: |
-          # 1. 优先编译并安装 openwrt 自带的 ccache 宿主机工具
-          make tools/ccache/compile -j$(nproc)
-          
-          # 2. 设置 ccache 最大缓存空间
+          make tools/ccache/compile -j"$(nproc)" || true
           ./staging_dir/host/bin/ccache -M 10G || true
-          
-          # 3. 动态全线程编译（如果报错退回单线程打印详细日志） [1]
-          make -j$(nproc) CONFIG_CCACHE=y || make -j1 V=s CONFIG_CCACHE=y
+          make -j"$(nproc)" CONFIG_CCACHE=y || make -j1 V=s CONFIG_CCACHE=y
 
       - name: Organize & Collect Firmware
         run: |
           mkdir -p firmware
-          cp openwrt/bin/targets/ramips/mt7621/*mir4* firmware/ || true
-          cp openwrt/.config firmware/build.config
+          cp -v openwrt/bin/targets/ramips/mt7621/*mir4* firmware/ || true
+          cp -v openwrt/.config firmware/build.config
+          find openwrt/bin/packages -name '*passwall*' -o -name '*xray-core*' | xargs -r cp -t firmware/ || true
           ls -lh firmware
 
       - name: Upload Firmware Directory
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-19.07-mir4-firmware
+          name: openwrt-19.07-mir4-passwall
           path: firmware/*
+          if-no-files-found: error
