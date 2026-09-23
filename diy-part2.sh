@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 在 openwrt 源码根目录执行：把 Xiaomi Mi Router 4 (mir4) 完美加进 19.07 编译体系
+# 在 openwrt 源码根目录执行：把 Xiaomi Mi Router 4 (mir4) 加进 19.07，
+# 并给最新 luci-app-passwall 打 4.14 / 19.07 兼容补丁。
 set -euo pipefail
 
 WS="${GITHUB_WORKSPACE:-$(cd .. && pwd)}"
@@ -44,36 +45,22 @@ PY
 # 3) 19.07 板级网络与升级配置注入
 echo "==> 正在配置 19.07 分支下 MIR4 网络与升级兼容..."
 
-# -------------------------------------------------
-# 1. 网络配置：单独添加 MIR4
-# -------------------------------------------------
-
 NETWORK_FILE="target/linux/ramips/base-files/etc/board.d/02_network"
 
 if [ -f "$NETWORK_FILE" ]; then
-
     echo "==> 检查 $NETWORK_FILE"
-
     if grep -q "xiaomi,mir4" "$NETWORK_FILE"; then
         echo "MIR4 网络配置已经存在，跳过"
     else
-
         echo "==> 正在注入 MIR4 switch 配置"
-
         python3 - "$NETWORK_FILE" <<'PY'
 import sys
-
 file = sys.argv[1]
-
 data = open(file).read()
-
-# 找到 xiaomi,mir3g case
 target = '''xiaomi,mir3g)'''
-
 if target not in data:
     print("未找到 mir3g 网络配置，请检查文件结构")
     sys.exit(0)
-
 
 insert = r'''
 xiaomi,mir4)
@@ -82,73 +69,36 @@ xiaomi,mir4)
 	;;
 
 '''
-
-data = data.replace(
-    target,
-    insert + target,
-    1
-)
-
+data = data.replace(target, insert + target, 1)
 open(file,"w").write(data)
-
 print("MIR4 网络 switch 配置注入完成")
-
 PY
-
     fi
-
 else
     echo "::warning:: 未找到 $NETWORK_FILE"
 fi
 
-
-
-# -------------------------------------------------
-# 2. 升级脚本 platform.sh 自动兼容 MIR4
-# -------------------------------------------------
-
 PLATFORM_FILE="target/linux/ramips/base-files/lib/upgrade/platform.sh"
-
 if [ -f "$PLATFORM_FILE" ]; then
-
     echo "==> 处理 upgrade platform.sh"
-
-    sed -i -E \
-    's/(xiaomi,)?mir3g/\1mir3g|\1mir4/g' \
-    "$PLATFORM_FILE"
-
+    sed -i -E 's/(xiaomi,)?mir3g/\1mir3g|\1mir4/g' "$PLATFORM_FILE"
     grep -q "mir4" "$PLATFORM_FILE" \
         && echo "platform.sh MIR4 注入成功" \
         || echo "::warning:: platform.sh 未发现 MIR4"
-
 else
     echo "::warning:: 未找到 $PLATFORM_FILE"
 fi
 
-
-
-# -------------------------------------------------
-# 3. uboot-envtools 自动兼容
-# -------------------------------------------------
-
 UBOOT_FILE="package/boot/uboot-envtools/files/ramips"
-
 if [ -f "$UBOOT_FILE" ]; then
-
     echo "==> 处理 uboot-envtools"
-
-    sed -i -E \
-    's/(xiaomi,)?mir3g/\1mir3g|\1mir4/g' \
-    "$UBOOT_FILE"
-
+    sed -i -E 's/(xiaomi,)?mir3g/\1mir3g|\1mir4/g' "$UBOOT_FILE"
     grep -q "mir4" "$UBOOT_FILE" \
         && echo "uboot-envtools MIR4 注入成功" \
         || echo "::warning:: uboot-envtools 未发现 MIR4"
-
 else
     echo "::warning:: 未找到 $UBOOT_FILE"
 fi
-
 
 echo "==> MIR4 板级兼容配置完成"
 
@@ -157,6 +107,88 @@ CFG=target/linux/ramips/mt7621/config-4.14
 if [ -f "$CFG" ]; then
     grep -q '^CONFIG_CRYPTO_ZSTD=y' "$CFG" || echo 'CONFIG_CRYPTO_ZSTD=y' >> "$CFG"
     echo "内核已追加配置 ZSTD 支持。"
+fi
+
+# 5) 最新 Passwall Makefile 在 19.07 上会因为不存在的包被 defconfig 冲掉
+echo "==> 给 luci-app-passwall 打 19.07 兼容补丁..."
+
+PW_MK=""
+for cand in \
+    feeds/passwall_luci/luci-app-passwall/Makefile \
+    package/feeds/passwall_luci/luci-app-passwall/Makefile \
+    package/passwall-luci/luci-app-passwall/Makefile
+do
+    if [ -f "$cand" ]; then
+        PW_MK="$cand"
+        break
+    fi
+done
+
+if [ -z "$PW_MK" ]; then
+    echo "::error::找不到 luci-app-passwall/Makefile，feeds 没拉到 Passwall luci 仓库"
+    find feeds -name Makefile -path '*passwall*' | head
+    exit 1
+fi
+
+echo "补丁目标: $PW_MK"
+cp "$PW_MK" "$PW_MK.bak"
+
+# 19.07 没有这些包：select 任意一个不存在，整包会被 kconfig 丢掉
+sed -i \
+    -e '/select PACKAGE_iptables-zz-legacy/d' \
+    -e '/select PACKAGE_iptables-mod-socket/d' \
+    -e '/select PACKAGE_kmod-nft-socket/d' \
+    -e '/select PACKAGE_kmod-nft-tproxy/d' \
+    -e '/select PACKAGE_kmod-nft-nat/d' \
+    "$PW_MK"
+
+# 19.07 packages 没有 lyaml；coreutils-timeout 有时也不拆包。从硬依赖拿掉，避免冲刷
+sed -i \
+    -e 's/+lyaml//g' \
+    -e 's/+coreutils-timeout//g' \
+    "$PW_MK"
+
+# 19.07 有 luci-compat，保留。若仍被冲掉，再去掉
+if ! grep -q 'luci-compat' feeds/luci/*/luci-compat/Makefile 2>/dev/null \
+   && ! find feeds/luci -path '*luci-compat/Makefile' | grep -q .; then
+    echo "未找到 luci-compat，从 LUCI_DEPENDS 移除"
+    sed -i 's/+luci-compat//g' "$PW_MK"
+fi
+
+echo "----- 修补后的 LUCI_DEPENDS / Iptables select -----"
+grep -n 'LUCI_DEPENDS\|iptables-zz\|iptables-mod-socket\|lyaml\|Iptables_Transparent' "$PW_MK" | head -40
+
+# 6) 19.07 没有 kmod-inet-diag / kmod-netlink-diag（sing-box 会拉，即使默认 n 也先抹掉）
+for mk in feeds/passwall_packages/sing-box/Makefile feeds/passwall_packages/*/Makefile; do
+    [ -f "$mk" ] || continue
+    sed -i 's/+kmod-inet-diag//g; s/+kmod-netlink-diag//g' "$mk" || true
+done
+
+# 7) 若 19.07 无 lyaml，放一个空包占位，防止其它地方再 select
+if ! find feeds package -path '*lyaml/Makefile' | grep -q .; then
+    echo "==> 注入 lyaml 占位包（仅满足依赖名，不提供 YAML 解析）"
+    mkdir -p package/lyaml-stub
+    cat > package/lyaml-stub/Makefile <<'EOF'
+include $(TOPDIR)/rules.mk
+PKG_NAME:=lyaml
+PKG_VERSION:=0
+PKG_RELEASE:=1
+include $(INCLUDE_DIR)/package.mk
+define Package/lyaml
+  SECTION:=lang
+  CATEGORY:=Languages
+  TITLE:=lyaml stub for OpenWrt 19.07
+endef
+define Package/lyaml/description
+  Placeholder so luci-app-passwall can be selected on 19.07.
+endef
+define Build/Compile
+endef
+define Package/lyaml/install
+	true
+endef
+$(eval $(call BuildPackage,lyaml))
+EOF
 fi
 
 echo "🎉 所有 19.07 适配补丁全部执行完毕！"
